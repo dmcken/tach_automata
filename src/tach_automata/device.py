@@ -38,20 +38,43 @@ Confirmed endpoints:
                                    health (cpu/memory/temp/uptime) -
                                    the main thing get_system_info()
                                    wraps. `network` returns per-zone
-                                   VLAN/bridge/interface/IP data.
-- config (GET)                  - Full device configuration. Not
-                                   implemented here yet - config (POST)
-                                   even less so, since this package is
-                                   read-only for now (see
-                                   change_password()/apply_changes()).
-- reboot (POST), update (PUT)   - Confirmed to exist in the docs, not
-                                   implemented - firmware/reboot actions
-                                   are out of scope for a read-only
-                                   identify/inventory package.
+                                   VLAN/bridge/interface/IP data,
+                                   `ethernet` per-port link/counters,
+                                   `wireless` radios and connected
+                                   peers - get_interfaces()/
+                                   get_ipaddresses()/get_wireless() wrap
+                                   these. Confirmed live against a
+                                   TNA-302 acting as a PtMP AP (radio
+                                   op_mode "master", `wireless.peers` an
+                                   empty *dict* while nobody's
+                                   connected) and a TNA-303X acting as
+                                   one end of a PtP link (op_mode
+                                   "station", `wireless.peers` a
+                                   non-empty *list* once connected) -
+                                   both shapes are handled.
+- config (GET/POST)             - Full device configuration; POST
+                                   supports a `dry_run` query param to
+                                   validate without applying. Since
+                                   this touches the live device,
+                                   get_config() is implemented but
+                                   set_config() defaults to dry_run=True
+                                   - callers have to opt in explicitly
+                                   with dry_run=False to actually change
+                                   anything.
+- reboot (POST)                 - Implemented, but never called
+                                   automatically by anything in this
+                                   package (including login()'s retry
+                                   path) - a caller has to invoke it
+                                   deliberately.
+- update (PUT)                  - Firmware update. Not implemented -
+                                   out of scope for now (needs its own
+                                   care around picking/validating a
+                                   firmware URL that this package has
+                                   no way to verify).
 
-Sensitive data warning: config (not implemented here) is documented to
-contain local user password hashes - if it's ever added, callers must
-not log/print it wholesale.
+Sensitive data warning: get_config()'s response is documented to
+contain local user password hashes - callers must not log/print it
+wholesale.
 '''
 from __future__ import annotations
 
@@ -86,11 +109,80 @@ class TachyonSystemInfo:
     cpu_temp_c: float | None
 
 
+@dataclasses.dataclass
+class TachyonInterface:
+    '''One physical (ethernet), bridge, or radio interface.
+
+    `kind` is "ethernet", "bridge", or "wireless" -- ethernet ports and
+    the radio come from a flat name->dict map (ethernet.ports,
+    wireless.radios), the bridge from one entry per zone
+    (network.zones.<zone>.data_bridge), so this normalizes all three
+    into one shape rather than making callers know where each field
+    actually lives.
+    '''
+    name: str
+    kind: str
+    mac: str
+    link_up: bool | None
+    speed_mbps: int | None
+    duplex: str | None
+
+
+@dataclasses.dataclass
+class TachyonIPAddress:
+    '''One IP address (v4 or v6) on a bridge interface, from
+    network.zones.<zone>.data_bridge.
+    '''
+    zone: str
+    interface: str
+    address: str  # CIDR, e.g. "10.14.1.30/24"
+    version: int
+    gateway: str | None
+
+
+@dataclasses.dataclass
+class TachyonWirelessPeer:
+    '''One connected peer on a radio - the far end of a PtP link, or
+    one of possibly several clients on a PtMP AP.
+    '''
+    mac: str
+    rssi: int | None
+    remote_rssi: int | None
+    snr: int | None
+    tx_mcs: int | None
+    rx_mcs: int | None
+    distance_m: int | None
+    connection_time_seconds: int | None
+
+
+@dataclasses.dataclass
+class TachyonWirelessRadio:
+    '''One radio, e.g. wlan0.'''
+    name: str
+    mac: str
+    op_mode: str  # "master" (AP/PtP-fixed-end) or "station" (PtP/PtMP client end)
+    ssid: str
+    freq_mhz: int | None
+    channel: int | None
+    channel_width_mhz: int | None
+    security: str
+    peers: list[TachyonWirelessPeer]
+
+
 class TachyonDevice:
     '''Tachyon Networks device handler (TNA-301/302/303X, TNS-100).
 
-    Read-only for now: change_password()/apply_changes() are
-    deliberately no-ops, never touching the device.
+    Identification and inventory (get_system_info/get_interfaces/
+    get_ipaddresses/get_wireless) are read-only and safe to call
+    freely. get_config()/set_config()/reboot() are real, working calls
+    against the live device -- set_config() defaults to dry_run=True
+    so it never applies anything unless a caller explicitly opts in,
+    but reboot() has no such guard, since the API itself doesn't offer
+    one. change_password()/apply_changes() are still deliberate no-ops:
+    the config schema's user/password fields haven't been confirmed
+    live yet, and guessing at field names for a write call against
+    real hardware is exactly the kind of mistake this package's
+    "confirmed live" discipline exists to avoid.
     '''
 
     _default_user = 'root'
@@ -258,3 +350,208 @@ class TachyonDevice:
             cpu_usage_percent=system.get('cpu_usage_percent'),
             cpu_temp_c=system.get('cpu_temp'),
         )
+
+    def get_interfaces(self) -> list[TachyonInterface]:
+        '''Every ethernet port, bridge, and radio as one flat list
+        (stats(type="ethernet,network,wireless")).
+
+        Raises:
+            RuntimeError: the data can't be parsed.
+
+        Returns:
+            list[TachyonInterface]: One entry per port/bridge/radio.
+        '''
+        data = self.get_stats('ethernet,network,wireless')
+        interfaces = []
+
+        for name, port in data.get('ethernet', {}).get('ports', {}).items():
+            interfaces.append(TachyonInterface(
+                name=name,
+                kind='ethernet',
+                mac='',  # not reported per-port -- only switch_mac (the whole switch chip)
+                link_up=port.get('link'),
+                speed_mbps=port.get('speed'),
+                duplex=port.get('duplex'),
+            ))
+
+        for zone_name, zone in data.get('network', {}).get('zones', {}).items():
+            bridge = zone.get('data_bridge')
+            if not bridge:
+                continue
+            interfaces.append(TachyonInterface(
+                name=bridge.get('interface', f'br-{zone_name}'),
+                kind='bridge',
+                mac=bridge.get('mac', ''),
+                link_up=None,  # not reported at the bridge level
+                speed_mbps=None,
+                duplex=None,
+            ))
+
+        for name, radio in data.get('wireless', {}).get('radios', {}).items():
+            interfaces.append(TachyonInterface(
+                name=name,
+                kind='wireless',
+                mac=radio.get('mac', ''),
+                link_up=None,
+                speed_mbps=None,
+                duplex=None,
+            ))
+
+        return interfaces
+
+    def get_ipaddresses(self) -> list[TachyonIPAddress]:
+        '''Every IPv4/IPv6 address on every zone's bridge interface
+        (stats(type="network")).
+
+        Raises:
+            RuntimeError: the data can't be parsed.
+
+        Returns:
+            list[TachyonIPAddress]: One entry per address.
+        '''
+        zones = self.get_stats('network').get('network', {}).get('zones', {})
+        addresses = []
+
+        for zone_name, zone in zones.items():
+            bridge = zone.get('data_bridge')
+            if not bridge:
+                continue
+            interface = bridge.get('interface', f'br-{zone_name}')
+
+            for version, key in ((4, 'ipv4'), (6, 'ipv6')):
+                block = bridge.get(key)
+                if not block:
+                    continue
+                gateway = block.get('gateway')
+                for address in block.get('ip_address', []):
+                    addresses.append(TachyonIPAddress(
+                        zone=zone_name,
+                        interface=interface,
+                        address=address,
+                        version=version,
+                        gateway=gateway,
+                    ))
+
+        return addresses
+
+    def get_wireless(self) -> list[TachyonWirelessRadio]:
+        '''Every radio and its connected peer(s) (stats(type="wireless")).
+
+        `wireless.peers` is confirmed live to come back as an empty
+        *dict* on a radio with nobody connected (e.g. an idle AP), but
+        a *list* of peer dicts once something is - both are handled
+        here rather than assuming one shape.
+
+        Raises:
+            RuntimeError: the data can't be parsed.
+
+        Returns:
+            list[TachyonWirelessRadio]: One entry per radio.
+        '''
+        wireless = self.get_stats('wireless').get('wireless', {})
+        raw_peers = wireless.get('peers', [])
+        peer_list = list(raw_peers.values()) if isinstance(raw_peers, dict) else raw_peers
+
+        radios = []
+        for name, radio in wireless.get('radios', {}).items():
+            radios.append(TachyonWirelessRadio(
+                name=name,
+                mac=radio.get('mac', ''),
+                op_mode=radio.get('op_mode', ''),
+                ssid=radio.get('ssid', ''),
+                freq_mhz=radio.get('freq'),
+                channel=radio.get('channel'),
+                channel_width_mhz=radio.get('channel_width'),
+                security=radio.get('security', ''),
+                # Confirmed live only a single radio (wlan0) is ever
+                # present, so every peer belongs to it -- there's no
+                # per-peer field naming which radio it's on.
+                peers=[self._parse_peer(p) for p in peer_list],
+            ))
+        return radios
+
+    def _parse_peer(self, peer: dict) -> TachyonWirelessPeer:
+        return TachyonWirelessPeer(
+            mac=peer.get('mac', ''),
+            rssi=peer.get('rssi'),
+            remote_rssi=peer.get('remote_rssi'),
+            snr=peer.get('snr'),
+            tx_mcs=peer.get('tx_mcs'),
+            rx_mcs=peer.get('rx_mcs'),
+            distance_m=peer.get('est_link_distance'),
+            connection_time_seconds=peer.get('connection_time'),
+        )
+
+    def get_config(self) -> dict:
+        '''Get the device's full configuration (config).
+
+        Documented to contain local user password hashes - never log
+        or print this return value wholesale.
+
+        Raises:
+            RuntimeError: the data can't be parsed.
+
+        Returns:
+            dict: Full device configuration.
+        '''
+        res = self._get('config')
+
+        if res.status_code == 200:
+            return res.json()
+
+        raise RuntimeError(f"Error fetching config: {res.status_code} {res.text}")
+
+    def set_config(self, config: dict, dry_run: bool = True) -> dict:
+        '''Apply a full configuration (config).
+
+        Defaults to dry_run=True (the API validates the config without
+        applying it) - a caller has to pass dry_run=False explicitly to
+        actually change anything on the device. This method itself is
+        otherwise untested against real hardware (no config change has
+        been confirmed live yet) - treat it as scaffolding to build on,
+        not a verified-safe operation.
+
+        Args:
+            config: Full configuration document, in the same shape
+                get_config() returns.
+            dry_run: Validate only, without applying. Defaults to True.
+
+        Raises:
+            RuntimeError: the request failed or was rejected.
+
+        Returns:
+            dict: The API's response body.
+        '''
+        res = self._session.post(
+            self._build_url('config'),
+            json=config,
+            params={'dry_run': 'true' if dry_run else 'false'},
+            cookies={'api_token': self._auth_token},
+            verify=self._verify_ssl,
+            timeout=self._timeout,
+        )
+
+        if res.status_code == 200:
+            return res.json()
+
+        raise RuntimeError(f"Error setting config: {res.status_code} {res.text}")
+
+    def reboot(self) -> None:
+        '''Reboot the device (reboot).
+
+        Untested against real hardware - scaffolding to build on, not
+        a verified-safe operation. Never called automatically by
+        anything in this package.
+
+        Raises:
+            RuntimeError: the request failed.
+        '''
+        res = self._session.post(
+            self._build_url('reboot'),
+            cookies={'api_token': self._auth_token},
+            verify=self._verify_ssl,
+            timeout=self._timeout,
+        )
+
+        if res.status_code != 200:
+            raise RuntimeError(f"Error rebooting device: {res.status_code} {res.text}")

@@ -5,14 +5,25 @@
 from . import exceptions
 
 # Classes
-from .device import TachyonDevice, TachyonSystemInfo
+from .device import (
+    TachyonDevice,
+    TachyonInterface,
+    TachyonIPAddress,
+    TachyonSystemInfo,
+    TachyonWirelessPeer,
+    TachyonWirelessRadio,
+)
 
 # Versions should comply with PEP 440:
 # https://www.python.org/dev/peps/pep-0440/
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     'TachyonDevice',
+    'TachyonIPAddress',
+    'TachyonInterface',
     'TachyonSystemInfo',
+    'TachyonWirelessPeer',
+    'TachyonWirelessRadio',
     'exceptions',
 ]

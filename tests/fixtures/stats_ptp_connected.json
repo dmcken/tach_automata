@@ -1,0 +1,58 @@
+{
+  "ethernet": {
+    "ports": {
+      "eth0": {
+        "link": true,
+        "autoneg": true,
+        "port": 4,
+        "speed": 1000,
+        "duplex": "full"
+      }
+    },
+    "switch_mac": "78:5E:E8:00:00:02"
+  },
+  "network": {
+    "zones": {
+      "wan": {
+        "data_bridge": {
+          "mac": "78:5E:E8:00:00:02",
+          "interface": "br-wan",
+          "ipv4": {
+            "ip_address": ["169.254.1.1/16", "10.99.1.2/24"],
+            "gateway": "10.99.1.254"
+          },
+          "ipv6": {
+            "ip_address": ["fe80::7a5e:e8ff:fe00:2/64"]
+          }
+        }
+      }
+    },
+    "hostname": "TEST-BACKHAUL-STA"
+  },
+  "wireless": {
+    "peers": [
+      {
+        "mac": "78:5E:E8:00:00:03",
+        "rssi": -47,
+        "remote_rssi": -55,
+        "snr": 19,
+        "tx_mcs": 12,
+        "rx_mcs": 12,
+        "est_link_distance": 111,
+        "connection_time": 6388203
+      }
+    ],
+    "radios": {
+      "wlan0": {
+        "name": "wlan0",
+        "mac": "78:5E:E8:00:00:04",
+        "op_mode": "station",
+        "ssid": "TEST-TAP-N",
+        "freq": 58320,
+        "channel": 1,
+        "channel_width": 2160,
+        "security": "WPA2-PSK (GCMP)"
+      }
+    }
+  }
+}

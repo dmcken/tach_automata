@@ -1,0 +1,53 @@
+{
+  "ethernet": {
+    "ports": {
+      "eth0": {
+        "link": true,
+        "autoneg": true,
+        "port": 4,
+        "speed": 1000,
+        "duplex": "full"
+      },
+      "eth1": {
+        "link": false,
+        "autoneg": true,
+        "port": 3,
+        "poe_out": false
+      }
+    },
+    "switch_mac": "78:5E:E8:00:00:01"
+  },
+  "network": {
+    "zones": {
+      "wan": {
+        "data_bridge": {
+          "mac": "78:5E:E8:00:00:01",
+          "interface": "br-wan",
+          "ipv4": {
+            "ip_address": ["169.254.1.1/16", "10.99.1.1/24"],
+            "gateway": "10.99.1.254"
+          },
+          "ipv6": {
+            "ip_address": ["fe80::7a5e:e8ff:fe00:1/64"]
+          }
+        }
+      }
+    },
+    "hostname": "TEST-TAP-N"
+  },
+  "wireless": {
+    "peers": {},
+    "radios": {
+      "wlan0": {
+        "name": "wlan0",
+        "mac": "78:5E:E8:00:00:03",
+        "op_mode": "master",
+        "ssid": "TEST-TAP-N",
+        "freq": 58320,
+        "channel": 1,
+        "channel_width": 2160,
+        "security": "WPA2-PSK (GCMP)"
+      }
+    }
+  }
+}

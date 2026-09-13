@@ -176,3 +176,146 @@ class TestGetStats:
 
         with pytest.raises(RuntimeError):
             dev.get_stats()
+
+
+class TestGetInterfaces:
+    def test_ap_idle_ethernet_bridge_and_radio(self, requests_mock, load_json):
+        requests_mock.get(
+            'http://192.0.2.1/cgi.lua/apiv1/stats',
+            json=load_json('stats_ap_idle.json'),
+        )
+        dev = TachyonDevice('192.0.2.1')
+        dev._auth_token = 'fake-token'
+
+        interfaces = dev.get_interfaces()
+
+        by_name = {i.name: i for i in interfaces}
+        assert by_name['eth0'].kind == 'ethernet'
+        assert by_name['eth0'].link_up is True
+        assert by_name['eth1'].link_up is False
+        assert by_name['br-wan'].kind == 'bridge'
+        assert by_name['br-wan'].mac == '78:5E:E8:00:00:01'
+        assert by_name['wlan0'].kind == 'wireless'
+        assert by_name['wlan0'].mac == '78:5E:E8:00:00:03'
+
+
+class TestGetIpaddresses:
+    def test_ipv4_and_ipv6_from_bridge(self, requests_mock, load_json):
+        requests_mock.get(
+            'http://192.0.2.1/cgi.lua/apiv1/stats',
+            json=load_json('stats_ap_idle.json'),
+        )
+        dev = TachyonDevice('192.0.2.1')
+        dev._auth_token = 'fake-token'
+
+        addresses = dev.get_ipaddresses()
+
+        v4 = [a for a in addresses if a.version == 4]
+        v6 = [a for a in addresses if a.version == 6]
+        assert {a.address for a in v4} == {'169.254.1.1/16', '10.99.1.1/24'}
+        assert all(a.gateway == '10.99.1.254' for a in v4)
+        assert {a.address for a in v6} == {'fe80::7a5e:e8ff:fe00:1/64'}
+        assert all(a.zone == 'wan' and a.interface == 'br-wan' for a in addresses)
+
+
+class TestGetWireless:
+    def test_idle_ap_radio_has_no_peers_despite_empty_dict_shape(self, requests_mock, load_json):
+        '''Confirmed live: an idle radio's `peers` comes back as {}
+        (a dict), not [] - this locks in that both shapes are handled.'''
+        requests_mock.get(
+            'http://192.0.2.1/cgi.lua/apiv1/stats',
+            json=load_json('stats_ap_idle.json'),
+        )
+        dev = TachyonDevice('192.0.2.1')
+        dev._auth_token = 'fake-token'
+
+        radios = dev.get_wireless()
+
+        assert len(radios) == 1
+        assert radios[0].op_mode == 'master'
+        assert radios[0].peers == []
+
+    def test_connected_ptp_radio_has_one_peer(self, requests_mock, load_json):
+        requests_mock.get(
+            'http://192.0.2.1/cgi.lua/apiv1/stats',
+            json=load_json('stats_ptp_connected.json'),
+        )
+        dev = TachyonDevice('192.0.2.1')
+        dev._auth_token = 'fake-token'
+
+        radios = dev.get_wireless()
+
+        assert len(radios) == 1
+        assert radios[0].op_mode == 'station'
+        assert len(radios[0].peers) == 1
+        peer = radios[0].peers[0]
+        assert peer.mac == '78:5E:E8:00:00:03'
+        assert peer.rssi == -47
+        assert peer.distance_m == 111
+
+
+class TestGetConfig:
+    def test_returns_parsed_json(self, requests_mock):
+        requests_mock.get(
+            'http://192.0.2.1/cgi.lua/apiv1/config',
+            json={'system': {'hostname': 'TEST'}},
+        )
+        dev = TachyonDevice('192.0.2.1')
+        dev._auth_token = 'fake-token'
+
+        assert dev.get_config() == {'system': {'hostname': 'TEST'}}
+
+
+class TestSetConfig:
+    def test_defaults_to_dry_run_true(self, requests_mock):
+        requests_mock.post(
+            'http://192.0.2.1/cgi.lua/apiv1/config',
+            json={'valid': True},
+        )
+        dev = TachyonDevice('192.0.2.1')
+        dev._auth_token = 'fake-token'
+
+        dev.set_config({'system': {'hostname': 'TEST'}})
+
+        assert requests_mock.request_history[0].qs['dry_run'] == ['true']
+
+    def test_dry_run_false_is_sent_when_requested(self, requests_mock):
+        requests_mock.post(
+            'http://192.0.2.1/cgi.lua/apiv1/config',
+            json={'valid': True},
+        )
+        dev = TachyonDevice('192.0.2.1')
+        dev._auth_token = 'fake-token'
+
+        dev.set_config({'system': {'hostname': 'TEST'}}, dry_run=False)
+
+        assert requests_mock.request_history[0].qs['dry_run'] == ['false']
+
+    def test_non_200_raises_runtime_error(self, requests_mock):
+        requests_mock.post(
+            'http://192.0.2.1/cgi.lua/apiv1/config',
+            status_code=400,
+            json={'error': 'invalid config'},
+        )
+        dev = TachyonDevice('192.0.2.1')
+        dev._auth_token = 'fake-token'
+
+        with pytest.raises(RuntimeError):
+            dev.set_config({'system': {}})
+
+
+class TestReboot:
+    def test_success_returns_none(self, requests_mock):
+        requests_mock.post('http://192.0.2.1/cgi.lua/apiv1/reboot', json={'status': 'ok'})
+        dev = TachyonDevice('192.0.2.1')
+        dev._auth_token = 'fake-token'
+
+        assert dev.reboot() is None
+
+    def test_non_200_raises_runtime_error(self, requests_mock):
+        requests_mock.post('http://192.0.2.1/cgi.lua/apiv1/reboot', status_code=500)
+        dev = TachyonDevice('192.0.2.1')
+        dev._auth_token = 'fake-token'
+
+        with pytest.raises(RuntimeError):
+            dev.reboot()
