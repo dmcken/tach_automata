@@ -90,6 +90,30 @@ from . import exceptions
 
 logger = logging.getLogger(__name__)
 
+# Confirmed live on a TNA-303X: system.users[].password_hash (md5-crypt),
+# wireless.radios.<radio>.passphrase, services.snmp.v2.community.
+SECRET_KEY_NAMES = frozenset({
+    'community', 'key', 'passphrase', 'password', 'password_hash', 'psk', 'secret',
+})
+REDACTED = '<redacted>'
+
+
+def redact_secrets(config):
+    '''Copy of `config` with secret values replaced by REDACTED.
+    Empty values are left empty so "unset" stays distinguishable.'''
+    if isinstance(config, list):
+        return [redact_secrets(v) for v in config]
+    if not isinstance(config, dict):
+        return config
+    result = {}
+    for key, value in config.items():
+        is_secret = str(key).lower() in SECRET_KEY_NAMES
+        if is_secret and not isinstance(value, (dict, list)) and value not in ('', None):
+            result[key] = REDACTED
+        else:
+            result[key] = redact_secrets(value)
+    return result
+
 
 @dataclasses.dataclass
 class TachyonSystemInfo:
@@ -482,11 +506,16 @@ class TachyonDevice:
             connection_time_seconds=peer.get('connection_time'),
         )
 
-    def get_config(self) -> dict:
+    def get_config(self, redact: bool = False) -> dict:
         '''Get the device's full configuration (config).
 
-        Documented to contain local user password hashes - never log
-        or print this return value wholesale.
+        Unredacted, it contains local user password hashes, the
+        wireless passphrase and SNMP community - never log or print it
+        wholesale. set_config() needs the unredacted form.
+
+        Args:
+            redact: Mask secrets (see redact_secrets()) for a copy
+                safe to store.
 
         Raises:
             RuntimeError: the data can't be parsed.
@@ -497,7 +526,8 @@ class TachyonDevice:
         res = self._get('config')
 
         if res.status_code == 200:
-            return res.json()
+            config = res.json()
+            return redact_secrets(config) if redact else config
 
         raise RuntimeError(f"Error fetching config: {res.status_code} {res.text}")
 

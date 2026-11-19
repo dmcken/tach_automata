@@ -5,7 +5,7 @@ import pytest
 import requests
 
 from tach_automata import exceptions
-from tach_automata.device import TachyonDevice
+from tach_automata.device import REDACTED, TachyonDevice, redact_secrets
 
 
 class TestBuildUrl:
@@ -264,6 +264,35 @@ class TestGetConfig:
         dev._auth_token = 'fake-token'
 
         assert dev.get_config() == {'system': {'hostname': 'TEST'}}
+
+    def test_redact_masks_live_confirmed_secrets(self, requests_mock):
+        requests_mock.get(
+            'http://192.0.2.1/cgi.lua/apiv1/config',
+            json={'config': {
+                'system': {'hostname': 'TEST', 'users': [
+                    {'username': 'root', 'password_hash': '$1$fake$fake'},
+                ]},
+                'wireless': {'radios': {'wlan0': {'ssid': 'TEST', 'passphrase': 'fake'}}},
+                'services': {'snmp': {'v2': {'enabled': True, 'community': 'fake'}}},
+            }},
+        )
+        dev = TachyonDevice('192.0.2.1')
+        dev._auth_token = 'fake-token'
+
+        cfg = dev.get_config(redact=True)['config']
+
+        assert cfg['system'] == {'hostname': 'TEST', 'users': [
+            {'username': 'root', 'password_hash': REDACTED},
+        ]}
+        assert cfg['wireless']['radios']['wlan0'] == {'ssid': 'TEST', 'passphrase': REDACTED}
+        assert cfg['services']['snmp']['v2'] == {'enabled': True, 'community': REDACTED}
+
+
+class TestRedactSecrets:
+    def test_empty_values_stay_empty_and_input_is_not_mutated(self):
+        cfg = {'community': '', 'passphrase': 'fake'}
+        assert redact_secrets(cfg) == {'community': '', 'passphrase': REDACTED}
+        assert cfg['passphrase'] == 'fake'
 
 
 class TestSetConfig:
